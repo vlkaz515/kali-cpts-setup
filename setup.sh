@@ -6,7 +6,7 @@
 # Usage: chmod +x setup.sh && ./setup.sh 2>&1 | tee ~/setup.log
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -114,14 +114,24 @@ section "2 — NEO4J (BloodHound backend)"
 
 if ! command -v neo4j &>/dev/null; then
     info "Installing Neo4j..."
-    wget -q -O - https://debian.neo4j.com/neotechnology.gpg.key | \
-        sudo apt-key add - 2>/dev/null
-    echo 'deb https://debian.neo4j.com stable latest' | \
-        sudo tee /etc/apt/sources.list.d/neo4j.list > /dev/null
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq neo4j
+    # Use timeout to prevent hanging on network issues
+    if timeout 30 wget -q -O - https://debian.neo4j.com/neotechnology.gpg.key | \
+        sudo apt-key add - 2>/dev/null; then
+        echo 'deb https://debian.neo4j.com stable latest' | \
+            sudo tee /etc/apt/sources.list.d/neo4j.list > /dev/null
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq neo4j 2>/dev/null && \
+            log "Neo4j installed" || \
+            warn "Neo4j install failed — run manually: sudo apt install neo4j"
+    else
+        warn "Neo4j GPG key download failed — trying apt directly..."
+        sudo apt-get install -y -qq neo4j 2>/dev/null && \
+            log "Neo4j installed via apt" || \
+            warn "Neo4j not available — install manually if needed for BloodHound"
+    fi
+else
+    log "Neo4j already installed"
 fi
-log "Neo4j installed"
 
 # =============================================================================
 section "3 — GO TOOLS"
@@ -331,18 +341,37 @@ WRAP
 done
 log "PKINITtools installed"
 
-# noPac — needs impacket in its own venv
+
+
+# noPac — CVE-2021-42278/42287: escalate standard domain user to Domain Admin
+# NOTE: May have issues on Python 3.13 due to impacket pkg_resources dependency
+# Alternative if broken: use impacket-addcomputer + impacket-getST (already installed)
 info "noPac..."
 NPAC="$TOOLS/noPac"; NPAC_VENV="$VENVS/noPac"
 [[ -d "$NPAC/.git" ]] && git -C "$NPAC" pull -q || \
     git clone --depth=1 -q https://github.com/Ridter/noPac "$NPAC"
 python3 -m venv "$NPAC_VENV"
-"$NPAC_VENV/bin/pip" install -q --upgrade pip setuptools impacket
+"$NPAC_VENV/bin/pip" install -q --upgrade pip setuptools
+"$NPAC_VENV/bin/pip" install -q impacket
 [[ -f "$NPAC/requirements.txt" ]] && \
     "$NPAC_VENV/bin/pip" install -q -r "$NPAC/requirements.txt" 2>/dev/null || true
+# Force setuptools reinstall AFTER all other installs
+# impacket's version.py uses pkg_resources which requires setuptools
+"$NPAC_VENV/bin/pip" install -q --force-reinstall setuptools
+# Patch impacket version.py to not use pkg_resources (removed in Python 3.13)
+IMPACKET_VER=$(find "$NPAC_VENV" -path "*/impacket/version.py" 2>/dev/null | head -1)
+if [[ -n "$IMPACKET_VER" ]]; then
+    sed -i 's/import pkg_resources/try:\n    import pkg_resources\nexcept ImportError:\n    pkg_resources = None/' \
+        "$IMPACKET_VER" 2>/dev/null || \
+    python3 -c "
+content = open('$IMPACKET_VER').read()
+content = content.replace('import pkg_resources', 'try:\n    import pkg_resources\nexcept ImportError:\n    pkg_resources = None')
+open('$IMPACKET_VER', 'w').write(content)
+"
+fi
 sudo tee /usr/local/bin/noPac > /dev/null <<EOF
 #!/usr/bin/env bash
-exec "$NPAC_VENV/bin/python3" "$NPAC/noPac.py" "\$@"
+cd "$NPAC" && exec "$NPAC_VENV/bin/python3" "$NPAC/noPac.py" "\$@"
 EOF
 sudo ln -sf /usr/local/bin/noPac /usr/local/bin/nopac
 sudo chmod +x /usr/local/bin/noPac
@@ -411,10 +440,16 @@ install_git_tool "FinalRecon" \
     "https://github.com/thewhiteh4t/FinalRecon" \
     "finalrecon.py"
 
-# SpiderFoot
+# SpiderFoot — install deps explicitly, requirements.txt alone misses some
 install_git_tool "SpiderFoot" \
     "https://github.com/smicallef/spiderfoot" \
     "sf.py"
+"$VENVS/SpiderFoot/bin/pip" install -q \
+    cherrypy cherrypy_cors dnspython cryptography \
+    --only-binary=:all: lxml 2>/dev/null || \
+"$VENVS/SpiderFoot/bin/pip" install -q \
+    cherrypy cherrypy_cors dnspython cryptography 2>/dev/null || true
+
 sudo tee /usr/local/bin/spiderfoot > /dev/null <<EOF
 #!/usr/bin/env bash
 exec "$VENVS/SpiderFoot/bin/python3" "$TOOLS/SpiderFoot/sf.py" "\$@"
@@ -438,17 +473,46 @@ EOF
 sudo chmod +x /usr/local/bin/xsstrike
 log "xsstrike installed"
 
-# droopescan — needs cement<3.0 + setuptools for Python 3.13
+# droopescan — needs cement==2.10.14 + Python 3.13 compat patches
 info "droopescan..."
 DS="$TOOLS/droopescan"; DS_VENV="$VENVS/droopescan"
 [[ -d "$DS/.git" ]] && git -C "$DS" pull -q || \
     git clone --depth=1 -q https://github.com/droope/droopescan "$DS"
 python3 -m venv "$DS_VENV"
 "$DS_VENV/bin/pip" install -q --upgrade pip setuptools
-"$DS_VENV/bin/pip" install -q "cement<3.0"
+"$DS_VENV/bin/pip" install -q "cement==2.10.14"
 [[ -f "$DS/requirements.txt" ]] && \
     "$DS_VENV/bin/pip" install -q -r "$DS/requirements.txt" 2>/dev/null || true
 "$DS_VENV/bin/pip" install -q -e "$DS" 2>/dev/null || true
+
+# Patch cement's ext_plugin.py for Python 3.12+ compatibility
+# cement 2.x uses the removed 'imp' module — patch it to use importlib instead
+CEMENT_PLUGIN=$(find "$DS_VENV" -name "ext_plugin.py" 2>/dev/null | head -1)
+if [[ -n "$CEMENT_PLUGIN" ]]; then
+    python3 << PATCHEOF
+path = "$CEMENT_PLUGIN"
+with open(path, "r") as f:
+    content = f.read()
+
+# Fix imports
+content = content.replace("import imp\n", "import importlib.util\nimport importlib.machinery\nimport os\n")
+content = content.replace("from imp import reload\n", "from importlib import reload\n")
+
+# Fix imp.find_module call — replace with os.path check
+old = "        f, path, desc = imp.find_module(plugin_name, [plugin_dir])"
+new = "        plugin_file = os.path.join(plugin_dir, plugin_name + '.py')\n        if not os.path.exists(plugin_file):\n            return False\n        path = plugin_file"
+content = content.replace(old, new)
+
+# Fix imp.load_module call — replace with importlib equivalent
+old2 = "        mod = imp.load_module(plugin_name, f, path, desc)"
+new2 = "        spec = importlib.util.spec_from_file_location(plugin_name, path)\n        mod = importlib.util.module_from_spec(spec)\n        spec.loader.exec_module(mod)"
+content = content.replace(old2, new2)
+
+with open(path, "w") as f:
+    f.write(content)
+print("cement ext_plugin.py patched for Python 3.13")
+PATCHEOF
+fi
 sudo tee /usr/local/bin/droopescan > /dev/null <<EOF
 #!/usr/bin/env bash
 exec "$DS_VENV/bin/python3" "$DS/droopescan" "\$@"
@@ -484,6 +548,7 @@ MM="$TOOLS/mimipenguin"; MM_VENV="$VENVS/mimipenguin"
     git clone --depth=1 -q https://github.com/huntergregal/mimipenguin "$MM"
 python3 -m venv "$MM_VENV"
 "$MM_VENV/bin/pip" install -q --upgrade pip setuptools passlib
+"$MM_VENV/bin/pip" install -q legacycrypt 2>/dev/null || true
 sudo tee /usr/local/bin/mimipenguin > /dev/null <<EOF
 #!/usr/bin/env bash
 exec "$MM_VENV/bin/python3" "$MM/mimipenguin.py" "\$@"
@@ -579,17 +644,30 @@ EOF
 sudo chmod +x /usr/local/bin/manspider
 log "manspider installed"
 
-# Single-package pip tools
+# Single-package pip tools — setuptools always installed for pkg_resources
 install_pip_tool "uploadserver"
 install_pip_tool "hashid"
 install_pip_tool "pypykatz"
-install_pip_tool "shodan"
+# shodan needs setuptools for pkg_resources
+SHODAN_VENV="$VENVS/shodan"
+python3 -m venv "$SHODAN_VENV"
+"$SHODAN_VENV/bin/pip" install -q --upgrade pip
+"$SHODAN_VENV/bin/pip" install -q --upgrade setuptools
+"$SHODAN_VENV/bin/pip" install -q shodan
+# Force setuptools reinstall to ensure pkg_resources is available
+"$SHODAN_VENV/bin/pip" install -q --force-reinstall setuptools
+sudo tee /usr/local/bin/shodan > /dev/null <<EOF
+#!/usr/bin/env bash
+exec "$SHODAN_VENV/bin/shodan" "\$@"
+EOF
+sudo chmod +x /usr/local/bin/shodan
+log "shodan installed"
 
 # openvasreporting — needs pyyaml
 info "openvasreporting..."
 OVR_VENV="$VENVS/openvasreporting"
 python3 -m venv "$OVR_VENV"
-"$OVR_VENV/bin/pip" install -q --upgrade pip setuptools pyyaml
+"$OVR_VENV/bin/pip" install -q --upgrade pip setuptools pyyaml defusedxml
 "$OVR_VENV/bin/pip" install -q openvasreporting 2>/dev/null || \
 "$OVR_VENV/bin/pip" install -q \
     git+https://github.com/TheGroundZero/openvasreporting 2>/dev/null || \
