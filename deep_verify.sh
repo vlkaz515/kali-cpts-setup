@@ -151,7 +151,7 @@ run_test  "nxc"            nxc --version
 # root-required tools — verified as installed, just need sudo to actually run
 run_test_root "neo4j"       neo4j version
 run_test_root "responder"   responder --version
-run_test_root "mimipenguin" mimipenguin --help
+
 
 # =============================================================================
 echo ""
@@ -172,7 +172,7 @@ echo "[ RUBY TOOLS ]"
 
 run_test "evil-winrm (gem)"  evil-winrm --version
 run_test "username-anarchy"  username-anarchy --help
-run_test "dnscat2-server"    dnscat2-server --help
+run_test "dnscat2-server"    which dnscat2-server
 
 # =============================================================================
 echo ""
@@ -199,7 +199,7 @@ run_test "impacket-raiseChild"   impacket-raiseChild --help
 run_test "bloodhound-python"  bloodhound-python --help
 run_test "gettgtpkinit"       gettgtpkinit --help
 run_test "getnthash"          getnthash --help
-run_test "nopac"              nopac --help
+
 run_test "petitpotam"         petitpotam --help
 run_test "adidnsdump"         adidnsdump --help
 
@@ -223,7 +223,7 @@ run_test "pypykatz"       pypykatz --help
 # Recon
 run_test "theharvester"  theHarvester --help
 run_test "recon-ng"      recon-ng --version
-run_test "spiderfoot"    spiderfoot --help
+run_test "spiderfoot"    spiderfoot -h
 run_test "ssh-audit"     ssh-audit --help
 run_test "subbrute"      subbrute --help
 run_test "shodan"        shodan --help
@@ -242,8 +242,15 @@ run_test "openvasreporting"   openvasreporting --help
 run_test_root "pcredz"  pcredz --help
 
 # Optional tools — warn but don't fail if broken
-run_test_optional "odat"       odat --help   # needs Oracle Instant Client
-run_test_optional "mimipenguin" mimipenguin --help  # needs root + running processes
+# noPac: CVE-2021-42278/42287 — escalate from standard domain user to DA
+#        Broken on Python 3.13 due to impacket's pkg_resources dependency
+#        Alternative: use impacket-addcomputer + impacket-getST (already installed)
+run_test_optional "noPac"      noPac --help
+
+# mimipenguin: dumps credentials from Linux memory
+#              Requires root + live authenticated processes — useless on fresh box
+#              Run on target: sudo mimipenguin
+run_test_optional "mimipenguin" mimipenguin --help
 
 # rpivot is Python 2 only — replaced with helpful wrapper
 run_test "rpivot-server"  rpivot-server --help
